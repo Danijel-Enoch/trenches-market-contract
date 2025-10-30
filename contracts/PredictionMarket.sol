@@ -2,6 +2,8 @@
 pragma solidity ^0.8.28;
 
 import "./PositionToken.sol";
+import "./ShareToken.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 contract PredictionMarket {
     enum Outcome { PUMP, DUMP, NO_CHANGE, RUG, MOON }
@@ -25,10 +27,19 @@ contract PredictionMarket {
     uint256 public constant TRADING_FEE_PLATFORM = 100; // 1%
     uint256 public constant FEE_DENOMINATOR = 10000;
     
+    uint256 public constant CREATOR_INITIAL_SHARES = 1000 * 1e18;
+    uint256 public constant TRADER_SHARE_REWARD = 10 * 1e18;
+    uint256 public constant WINNER_SHARE_MULTIPLIER = 100;
+    
     address public platformOwner;
     uint256 public nextMarketId;
     mapping(uint256 => Market) public markets;
     mapping(address => bool) public authorizedBots;
+    
+    ShareToken public shareToken;
+    IERC20 public protocolToken;
+    uint256 public protocolTokenBalance;
+    uint256 public totalSharesIssued;
     
     event MarketCreated(uint256 indexed marketId, address creator, string tokenAddress, uint256 initialPrice, uint256 settlementTime);
     event SharesPurchased(uint256 indexed marketId, address buyer, Outcome outcome, uint256 shares, uint256 cost);
@@ -38,9 +49,13 @@ contract PredictionMarket {
     event BotAuthorized(address indexed bot, bool authorized);
     event BatchSettlement(uint256[] marketIds, uint256 successCount);
     event FeesPaid(uint256 indexed marketId, address indexed creator, uint256 creatorFee, uint256 platformFee);
+    event ShareTokensEarned(address indexed user, uint256 amount, string reason);
+    event ProtocolTokenDeposited(uint256 amount);
+    event ProtocolTokenClaimed(address indexed user, uint256 shareTokensBurned, uint256 protocolTokensReceived);
     
     constructor() {
         platformOwner = msg.sender;
+        shareToken = new ShareToken(address(this));
     }
     
     function createMarket(string calldata _tokenAddress, uint256 _initialPrice) external payable returns (uint256) {
@@ -71,6 +86,10 @@ contract PredictionMarket {
             payable(msg.sender).transfer(msg.value - CREATOR_FEE);
         }
         
+        shareToken.mint(msg.sender, CREATOR_INITIAL_SHARES);
+        totalSharesIssued += CREATOR_INITIAL_SHARES;
+        emit ShareTokensEarned(msg.sender, CREATOR_INITIAL_SHARES, "Market creation");
+        
         emit MarketCreated(marketId, msg.sender, _tokenAddress, _initialPrice, market.settlementTime);
         return marketId;
     }
@@ -97,6 +116,10 @@ contract PredictionMarket {
         
         PositionToken posToken = PositionToken(market.positionTokens[_outcome]);
         posToken.mint(msg.sender, _shares);
+        
+        shareToken.mint(market.creator, TRADER_SHARE_REWARD);
+        totalSharesIssued += TRADER_SHARE_REWARD;
+        emit ShareTokensEarned(market.creator, TRADER_SHARE_REWARD, "Trading activity");
         
         if (msg.value > cost) {
             payable(msg.sender).transfer(msg.value - cost);
@@ -207,6 +230,11 @@ contract PredictionMarket {
         
         posToken.burn(msg.sender, userShares);
         
+        uint256 shareReward = userShares * WINNER_SHARE_MULTIPLIER;
+        shareToken.mint(msg.sender, shareReward);
+        totalSharesIssued += shareReward;
+        emit ShareTokensEarned(msg.sender, shareReward, "Winning claim");
+        
         payable(msg.sender).transfer(userWinnings);
         
         emit WinningsClaimed(_marketId, msg.sender, userWinnings);
@@ -311,5 +339,57 @@ contract PredictionMarket {
     
     function isAuthorizedBot(address _bot) external view returns (bool) {
         return authorizedBots[_bot];
+    }
+    
+    function setProtocolToken(address _protocolToken) external {
+        require(msg.sender == platformOwner, "Only platform owner");
+        require(address(protocolToken) == address(0), "Protocol token already set");
+        protocolToken = IERC20(_protocolToken);
+    }
+    
+    function depositProtocolTokens(uint256 _amount) external {
+        require(msg.sender == platformOwner, "Only platform owner");
+        require(address(protocolToken) != address(0), "Protocol token not set");
+        require(_amount > 0, "Invalid amount");
+        
+        protocolToken.transferFrom(msg.sender, address(this), _amount);
+        protocolTokenBalance += _amount;
+        
+        emit ProtocolTokenDeposited(_amount);
+    }
+    
+    function claimProtocolTokens(uint256 _shareAmount) external {
+        require(address(protocolToken) != address(0), "Protocol token not set");
+        require(_shareAmount > 0, "Invalid share amount");
+        require(shareToken.balanceOf(msg.sender) >= _shareAmount, "Insufficient share tokens");
+        require(totalSharesIssued > 0, "No shares issued");
+        require(protocolTokenBalance > 0, "No protocol tokens available");
+        
+        uint256 protocolAmount = (protocolTokenBalance * _shareAmount) / totalSharesIssued;
+        require(protocolAmount > 0, "Protocol amount too small");
+        
+        shareToken.burn(msg.sender, _shareAmount);
+        totalSharesIssued -= _shareAmount;
+        protocolTokenBalance -= protocolAmount;
+        
+        protocolToken.transfer(msg.sender, protocolAmount);
+        
+        emit ProtocolTokenClaimed(msg.sender, _shareAmount, protocolAmount);
+    }
+    
+    function getShareTokenAddress() external view returns (address) {
+        return address(shareToken);
+    }
+    
+    function getProtocolTokenAddress() external view returns (address) {
+        return address(protocolToken);
+    }
+    
+    function getUserShareBalance(address _user) external view returns (uint256) {
+        return shareToken.balanceOf(_user);
+    }
+    
+    function getProtocolTokenInfo() external view returns (uint256 balance, uint256 totalShares) {
+        return (protocolTokenBalance, totalSharesIssued);
     }
 }

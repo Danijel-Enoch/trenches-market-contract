@@ -419,6 +419,218 @@ contract PredictionMarketTest is Test {
         assertEq(winnings1, winnings2);
     }
     
+    function testAllLosingPoolFundsGoToWinners() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        // Create 5 different traders, each betting on a different outcome
+        address trader3 = makeAddr("trader3");
+        address trader4 = makeAddr("trader4");
+        address trader5 = makeAddr("trader5");
+        
+        vm.deal(trader3, 100 ether);
+        vm.deal(trader4, 100 ether);
+        vm.deal(trader5, 100 ether);
+        
+        // Calculate costs first
+        uint256 costPump = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 100);
+        uint256 costDump = market.calculateBuyCost(marketId, PredictionMarket.Outcome.DUMP, 100);
+        uint256 costMoon = market.calculateBuyCost(marketId, PredictionMarket.Outcome.MOON, 100);
+        uint256 costRug = market.calculateBuyCost(marketId, PredictionMarket.Outcome.RUG, 100);
+        uint256 costNoChange = market.calculateBuyCost(marketId, PredictionMarket.Outcome.NO_CHANGE, 100);
+        
+        // Each trader bets on different outcome
+        vm.prank(trader1);
+        market.buyShares{value: costPump}(marketId, PredictionMarket.Outcome.PUMP, 100);
+        
+        vm.prank(trader2);
+        market.buyShares{value: costDump}(marketId, PredictionMarket.Outcome.DUMP, 100);
+        
+        vm.prank(trader3);
+        market.buyShares{value: costMoon}(marketId, PredictionMarket.Outcome.MOON, 100);
+        
+        vm.prank(trader4);
+        market.buyShares{value: costRug}(marketId, PredictionMarket.Outcome.RUG, 100);
+        
+        vm.prank(trader5);
+        market.buyShares{value: costNoChange}(marketId, PredictionMarket.Outcome.NO_CHANGE, 100);
+        
+        // Calculate expected prize pool from all outcomes
+        uint256 expectedTotalPrizePool;
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.PUMP);
+            expectedTotalPrizePool = v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.DUMP);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.MOON);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.RUG);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.NO_CHANGE);
+            expectedTotalPrizePool += v;
+        }
+        
+        // Settle with PUMP winning
+        vm.warp(block.timestamp + 86401);
+        vm.prank(settlementBot);
+        market.settleMarket(marketId, 1150e18);
+        
+        // Trader1 claims winnings
+        uint256 balanceBefore = trader1.balance;
+        vm.prank(trader1);
+        market.claimWinnings(marketId);
+        
+        // Winner should receive entire prize pool from all 5 outcomes
+        assertEq(trader1.balance - balanceBefore, expectedTotalPrizePool, "Winner should receive entire prize pool from all outcomes");
+        
+        // Verify losers cannot claim
+        vm.prank(trader2);
+        vm.expectRevert("No winning shares");
+        market.claimWinnings(marketId);
+        
+        vm.prank(trader3);
+        vm.expectRevert("No winning shares");
+        market.claimWinnings(marketId);
+    }
+    
+    function testMultipleWinnersReceiveFundsFromAllLosingPools() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        address trader3 = makeAddr("trader3");
+        address trader4 = makeAddr("trader4");
+        address trader5 = makeAddr("trader5");
+        
+        vm.deal(trader3, 100 ether);
+        vm.deal(trader4, 100 ether);
+        vm.deal(trader5, 100 ether);
+        
+        // Calculate costs first
+        uint256 costPump1 = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 100);
+        
+        // Trader1 and Trader2 both bet on PUMP (winners)
+        vm.prank(trader1);
+        market.buyShares{value: costPump1}(marketId, PredictionMarket.Outcome.PUMP, 100);
+        
+        uint256 costPump2 = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 100);
+        vm.prank(trader2);
+        market.buyShares{value: costPump2}(marketId, PredictionMarket.Outcome.PUMP, 100);
+        
+        // Other traders bet on losing outcomes
+        uint256 costDump = market.calculateBuyCost(marketId, PredictionMarket.Outcome.DUMP, 200);
+        vm.prank(trader3);
+        market.buyShares{value: costDump}(marketId, PredictionMarket.Outcome.DUMP, 200);
+        
+        uint256 costMoon = market.calculateBuyCost(marketId, PredictionMarket.Outcome.MOON, 150);
+        vm.prank(trader4);
+        market.buyShares{value: costMoon}(marketId, PredictionMarket.Outcome.MOON, 150);
+        
+        uint256 costRug = market.calculateBuyCost(marketId, PredictionMarket.Outcome.RUG, 175);
+        vm.prank(trader5);
+        market.buyShares{value: costRug}(marketId, PredictionMarket.Outcome.RUG, 175);
+        
+        // Calculate total prize pool
+        uint256 expectedTotalPrizePool;
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.PUMP);
+            expectedTotalPrizePool = v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.DUMP);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.MOON);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.RUG);
+            expectedTotalPrizePool += v;
+        }
+        {
+            (, uint256 v) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.NO_CHANGE);
+            expectedTotalPrizePool += v;
+        }
+        
+        // Settle with PUMP winning
+        vm.warp(block.timestamp + 86401);
+        vm.prank(settlementBot);
+        market.settleMarket(marketId, 1150e18);
+        
+        // Both winners claim
+        uint256 balance1Before = trader1.balance;
+        vm.prank(trader1);
+        market.claimWinnings(marketId);
+        
+        uint256 balance2Before = trader2.balance;
+        vm.prank(trader2);
+        market.claimWinnings(marketId);
+        
+        uint256 totalWinnings = (trader1.balance - balance1Before) + (trader2.balance - balance2Before);
+        
+        // Total winnings should equal entire prize pool from all 5 outcomes
+        assertEq(totalWinnings, expectedTotalPrizePool, "Total winnings should equal entire prize pool from all outcomes");
+        
+        // Winners with equal shares should get equal amounts
+        assertEq(trader1.balance - balance1Before, trader2.balance - balance2Before, "Winners with equal shares should get equal winnings");
+    }
+    
+    function testWinnerClaimsReceiveFundsFromAllPools() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        address trader3 = makeAddr("trader3");
+        vm.deal(trader3, 100 ether);
+        
+        // Calculate costs first
+        uint256 costPump = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 100);
+        uint256 costDump = market.calculateBuyCost(marketId, PredictionMarket.Outcome.DUMP, 100);
+        uint256 costMoon = market.calculateBuyCost(marketId, PredictionMarket.Outcome.MOON, 100);
+        
+        // Trader1 bets on PUMP (winner)
+        vm.prank(trader1);
+        market.buyShares{value: costPump}(marketId, PredictionMarket.Outcome.PUMP, 100);
+        
+        // Trader2 bets on DUMP (loser)
+        vm.prank(trader2);
+        market.buyShares{value: costDump}(marketId, PredictionMarket.Outcome.DUMP, 100);
+        
+        // Trader3 bets on MOON (loser)
+        vm.prank(trader3);
+        market.buyShares{value: costMoon}(marketId, PredictionMarket.Outcome.MOON, 100);
+        
+        // Get volumes before settlement
+        (, uint256 volumePumpBefore) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.PUMP);
+        (, uint256 volumeDumpBefore) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.DUMP);
+        (, uint256 volumeMoonBefore) = market.getOutcomeStats(marketId, PredictionMarket.Outcome.MOON);
+        
+        uint256 totalPrizePool = volumePumpBefore + volumeDumpBefore + volumeMoonBefore;
+        
+        // Settle with PUMP winning
+        vm.warp(block.timestamp + 86401);
+        vm.prank(settlementBot);
+        market.settleMarket(marketId, 1150e18);
+        
+        // Winner claims all winnings
+        uint256 balanceBefore = trader1.balance;
+        vm.prank(trader1);
+        market.claimWinnings(marketId);
+        
+        uint256 totalWinnings = trader1.balance - balanceBefore;
+        
+        // Winner should receive funds from all 3 pools
+        assertEq(totalWinnings, totalPrizePool, "Winner should receive entire prize pool from all outcomes");
+        assertTrue(totalWinnings > volumePumpBefore, "Total winnings should exceed winner's pool alone");
+    }
+    
     function testGetUserShares() public {
         vm.prank(creator);
         uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
