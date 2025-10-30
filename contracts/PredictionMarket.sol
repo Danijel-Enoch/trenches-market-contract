@@ -28,13 +28,16 @@ contract PredictionMarket {
     address public platformOwner;
     uint256 public nextMarketId;
     mapping(uint256 => Market) public markets;
-    mapping(uint256 => mapping(Outcome => uint256)) public accumulatedFees;
+    mapping(address => bool) public authorizedBots;
     
     event MarketCreated(uint256 indexed marketId, address creator, string tokenAddress, uint256 initialPrice, uint256 settlementTime);
     event SharesPurchased(uint256 indexed marketId, address buyer, Outcome outcome, uint256 shares, uint256 cost);
     event SharesSold(uint256 indexed marketId, address seller, Outcome outcome, uint256 shares, uint256 payout);
     event MarketSettled(uint256 indexed marketId, Outcome winningOutcome, uint256 finalPrice);
     event WinningsClaimed(uint256 indexed marketId, address winner, uint256 amount);
+    event BotAuthorized(address indexed bot, bool authorized);
+    event BatchSettlement(uint256[] marketIds, uint256 successCount);
+    event FeesPaid(uint256 indexed marketId, address indexed creator, uint256 creatorFee, uint256 platformFee);
     
     constructor() {
         platformOwner = msg.sender;
@@ -88,7 +91,9 @@ contract PredictionMarket {
         market.totalShares[_outcome] += _shares;
         market.totalVolume[_outcome] += netCost;
         
-        accumulatedFees[_marketId][_outcome] += creatorFee + platformFee;
+        // Send fees immediately
+        payable(market.creator).transfer(creatorFee);
+        payable(platformOwner).transfer(platformFee);
         
         PositionToken posToken = PositionToken(market.positionTokens[_outcome]);
         posToken.mint(msg.sender, _shares);
@@ -97,6 +102,7 @@ contract PredictionMarket {
             payable(msg.sender).transfer(msg.value - cost);
         }
         
+        emit FeesPaid(_marketId, market.creator, creatorFee, platformFee);
         emit SharesPurchased(_marketId, msg.sender, _outcome, _shares, cost);
     }
     
@@ -127,16 +133,20 @@ contract PredictionMarket {
             market.totalVolume[_outcome] = 0;
         }
         
-        accumulatedFees[_marketId][_outcome] += creatorFee + platformFee;
-        
         posToken.burn(msg.sender, _shares);
+        
+        // Send fees immediately
+        payable(market.creator).transfer(creatorFee);
+        payable(platformOwner).transfer(platformFee);
         
         payable(msg.sender).transfer(netPayout);
         
+        emit FeesPaid(_marketId, market.creator, creatorFee, platformFee);
         emit SharesSold(_marketId, msg.sender, _outcome, _shares, netPayout);
     }
     
     function settleMarket(uint256 _marketId, uint256 _finalPrice) external {
+        require(authorizedBots[msg.sender] || msg.sender == platformOwner, "Not authorized");
         Market storage market = markets[_marketId];
         require(!market.settled, "Market already settled");
         require(block.timestamp >= market.settlementTime, "Settlement time not reached");
@@ -146,6 +156,34 @@ contract PredictionMarket {
         market.winningOutcome = determineOutcome(market.initialPrice, _finalPrice);
         
         emit MarketSettled(_marketId, market.winningOutcome, _finalPrice);
+    }
+    
+    function batchSettleMarkets(uint256[] calldata _marketIds, uint256[] calldata _finalPrices) external {
+        require(authorizedBots[msg.sender] || msg.sender == platformOwner, "Not authorized");
+        require(_marketIds.length == _finalPrices.length, "Array length mismatch");
+        
+        uint256 successCount = 0;
+        
+        for (uint256 i = 0; i < _marketIds.length; i++) {
+            Market storage market = markets[_marketIds[i]];
+            
+            if (!market.settled && block.timestamp >= market.settlementTime) {
+                market.settled = true;
+                market.finalPrice = _finalPrices[i];
+                market.winningOutcome = determineOutcome(market.initialPrice, _finalPrices[i]);
+                
+                emit MarketSettled(_marketIds[i], market.winningOutcome, _finalPrices[i]);
+                successCount++;
+            }
+        }
+        
+        emit BatchSettlement(_marketIds, successCount);
+    }
+    
+    function authorizeBot(address _bot, bool _authorized) external {
+        require(msg.sender == platformOwner, "Only platform owner");
+        authorizedBots[_bot] = _authorized;
+        emit BotAuthorized(_bot, _authorized);
     }
     
     function claimWinnings(uint256 _marketId) external {
@@ -172,33 +210,6 @@ contract PredictionMarket {
         payable(msg.sender).transfer(userWinnings);
         
         emit WinningsClaimed(_marketId, msg.sender, userWinnings);
-    }
-    
-    function withdrawFees(uint256 _marketId) external {
-        Market storage market = markets[_marketId];
-        require(market.settled, "Market not settled");
-        
-        uint256 totalCreatorFees = 0;
-        uint256 totalPlatformFees = 0;
-        
-        for (uint256 i = 0; i < 5; i++) {
-            uint256 fees = accumulatedFees[_marketId][Outcome(i)];
-            uint256 creatorShare = (fees * TRADING_FEE_CREATOR) / (TRADING_FEE_CREATOR + TRADING_FEE_PLATFORM);
-            uint256 platformShare = fees - creatorShare;
-            
-            totalCreatorFees += creatorShare;
-            totalPlatformFees += platformShare;
-            
-            accumulatedFees[_marketId][Outcome(i)] = 0;
-        }
-        
-        if (msg.sender == market.creator && totalCreatorFees > 0) {
-            payable(market.creator).transfer(totalCreatorFees);
-        }
-        
-        if (msg.sender == platformOwner && totalPlatformFees > 0) {
-            payable(platformOwner).transfer(totalPlatformFees);
-        }
     }
     
     function calculateBuyCost(uint256 _marketId, Outcome _outcome, uint256 _shares) public view returns (uint256) {
@@ -276,5 +287,29 @@ contract PredictionMarket {
     
     function getPositionToken(uint256 _marketId, Outcome _outcome) external view returns (address) {
         return markets[_marketId].positionTokens[_outcome];
+    }
+    
+    function getUnsettledMarkets(uint256[] calldata _marketIds) external view returns (uint256[] memory) {
+        uint256 count = 0;
+        for (uint256 i = 0; i < _marketIds.length; i++) {
+            if (!markets[_marketIds[i]].settled && block.timestamp >= markets[_marketIds[i]].settlementTime) {
+                count++;
+            }
+        }
+        
+        uint256[] memory unsettled = new uint256[](count);
+        uint256 index = 0;
+        for (uint256 i = 0; i < _marketIds.length; i++) {
+            if (!markets[_marketIds[i]].settled && block.timestamp >= markets[_marketIds[i]].settlementTime) {
+                unsettled[index] = _marketIds[i];
+                index++;
+            }
+        }
+        
+        return unsettled;
+    }
+    
+    function isAuthorizedBot(address _bot) external view returns (bool) {
+        return authorizedBots[_bot];
     }
 }

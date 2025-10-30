@@ -35,8 +35,10 @@ contract PredictionMarketTest is Test {
         vm.deal(trader2, 100 ether);
         vm.deal(settlementBot, 100 ether);
         
-        vm.prank(platformOwner);
+        vm.startPrank(platformOwner);
         market = new PredictionMarket();
+        market.authorizeBot(settlementBot, true);
+        vm.stopPrank();
     }
     
     function testCreateMarket() public {
@@ -460,5 +462,287 @@ contract PredictionMarketTest is Test {
         // Settlement time should be next midnight
         assertTrue(settlementTime > createdAt);
         assertTrue(settlementTime % 86400 == 0); // Should be multiple of 1 day
+    }
+    
+    function testAuthorizeBot() public {
+        address bot = address(0x999);
+        
+        assertFalse(market.isAuthorizedBot(bot));
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        
+        assertTrue(market.isAuthorizedBot(bot));
+    }
+    
+    function testUnauthorizeBot() public {
+        address bot = address(0x999);
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        assertTrue(market.isAuthorizedBot(bot));
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, false);
+        assertFalse(market.isAuthorizedBot(bot));
+    }
+    
+    function testOnlyOwnerCanAuthorizeBot() public {
+        address bot = address(0x999);
+        
+        vm.prank(creator);
+        vm.expectRevert("Only platform owner");
+        market.authorizeBot(bot, true);
+    }
+    
+    function testAuthorizedBotCanSettle() public {
+        address bot = address(0x999);
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        (, , , , uint256 settlementTime, , ) = market.getMarketInfo(marketId);
+        vm.warp(settlementTime + 1);
+        
+        vm.prank(bot);
+        market.settleMarket(marketId, 1100e18);
+        
+        (, , , , , bool settled, ) = market.getMarketInfo(marketId);
+        assertTrue(settled);
+    }
+    
+    function testUnauthorizedBotCannotSettle() public {
+        address bot = address(0x999);
+        
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        (, , , , uint256 settlementTime, , ) = market.getMarketInfo(marketId);
+        vm.warp(settlementTime + 1);
+        
+        vm.prank(bot);
+        vm.expectRevert("Not authorized");
+        market.settleMarket(marketId, 1100e18);
+    }
+    
+    function testBatchSettleMarkets() public {
+        address bot = address(0x999);
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        
+        // Create 3 markets
+        vm.startPrank(creator);
+        uint256 marketId1 = market.createMarket{value: CREATOR_FEE}("TOKEN-1", 1000e18);
+        uint256 marketId2 = market.createMarket{value: CREATOR_FEE}("TOKEN-2", 2000e18);
+        uint256 marketId3 = market.createMarket{value: CREATOR_FEE}("TOKEN-3", 3000e18);
+        vm.stopPrank();
+        
+        // Warp to settlement time
+        (, , , , uint256 settlementTime, , ) = market.getMarketInfo(marketId1);
+        vm.warp(settlementTime + 1);
+        
+        // Batch settle
+        uint256[] memory marketIds = new uint256[](3);
+        marketIds[0] = marketId1;
+        marketIds[1] = marketId2;
+        marketIds[2] = marketId3;
+        
+        uint256[] memory finalPrices = new uint256[](3);
+        finalPrices[0] = 1100e18; // PUMP
+        finalPrices[1] = 1800e18; // DUMP
+        finalPrices[2] = 4500e18; // MOON
+        
+        vm.prank(bot);
+        market.batchSettleMarkets(marketIds, finalPrices);
+        
+        // Verify all settled
+        (, , , , , bool settled1, ) = market.getMarketInfo(marketId1);
+        (, , , , , bool settled2, ) = market.getMarketInfo(marketId2);
+        (, , , , , bool settled3, ) = market.getMarketInfo(marketId3);
+        
+        assertTrue(settled1);
+        assertTrue(settled2);
+        assertTrue(settled3);
+    }
+    
+    function testBatchSettleArrayLengthMismatch() public {
+        address bot = address(0x999);
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        
+        uint256[] memory marketIds = new uint256[](2);
+        uint256[] memory finalPrices = new uint256[](3);
+        
+        vm.prank(bot);
+        vm.expectRevert("Array length mismatch");
+        market.batchSettleMarkets(marketIds, finalPrices);
+    }
+    
+    function testBatchSettleSkipsAlreadySettled() public {
+        address bot = address(0x999);
+        
+        vm.prank(platformOwner);
+        market.authorizeBot(bot, true);
+        
+        // Create 2 markets
+        vm.startPrank(creator);
+        uint256 marketId1 = market.createMarket{value: CREATOR_FEE}("TOKEN-1", 1000e18);
+        uint256 marketId2 = market.createMarket{value: CREATOR_FEE}("TOKEN-2", 2000e18);
+        vm.stopPrank();
+        
+        (, , , , uint256 settlementTime, , ) = market.getMarketInfo(marketId1);
+        vm.warp(settlementTime + 1);
+        
+        // Settle first market individually
+        vm.prank(bot);
+        market.settleMarket(marketId1, 1100e18);
+        
+        // Try batch settle both
+        uint256[] memory marketIds = new uint256[](2);
+        marketIds[0] = marketId1;
+        marketIds[1] = marketId2;
+        
+        uint256[] memory finalPrices = new uint256[](2);
+        finalPrices[0] = 1200e18;
+        finalPrices[1] = 2200e18;
+        
+        vm.prank(bot);
+        market.batchSettleMarkets(marketIds, finalPrices);
+        
+        // First market should still have old price
+        (, , , , , , uint256 finalPrice1) = market.getMarketInfo(marketId1);
+        (, , , , , , uint256 finalPrice2) = market.getMarketInfo(marketId2);
+        
+        assertEq(finalPrice1, 1100e18); // Original settlement price
+        assertEq(finalPrice2, 2200e18); // New settlement price
+    }
+    
+    function testGetUnsettledMarkets() public {
+        vm.warp(1000000);
+        
+        // Create 3 markets
+        vm.startPrank(creator);
+        uint256 marketId1 = market.createMarket{value: CREATOR_FEE}("TOKEN-1", 1000e18);
+        uint256 marketId2 = market.createMarket{value: CREATOR_FEE}("TOKEN-2", 2000e18);
+        uint256 marketId3 = market.createMarket{value: CREATOR_FEE}("TOKEN-3", 3000e18);
+        vm.stopPrank();
+        
+        // Warp to settlement time
+        (, , , , uint256 settlementTime, , ) = market.getMarketInfo(marketId1);
+        vm.warp(settlementTime + 1);
+        
+        // Settle first market
+        vm.prank(settlementBot);
+        market.settleMarket(marketId1, 1100e18);
+        
+        // Check unsettled
+        uint256[] memory checkMarkets = new uint256[](3);
+        checkMarkets[0] = marketId1;
+        checkMarkets[1] = marketId2;
+        checkMarkets[2] = marketId3;
+        
+        uint256[] memory unsettled = market.getUnsettledMarkets(checkMarkets);
+        
+        assertEq(unsettled.length, 2);
+        assertEq(unsettled[0], marketId2);
+        assertEq(unsettled[1], marketId3);
+    }
+    
+    function testFeesArePaidImmediatelyOnBuy() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        uint256 sharesToBuy = 100;
+        uint256 cost = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, sharesToBuy);
+        
+        uint256 expectedCreatorFee = (cost * 10) / 10000; // 0.1%
+        uint256 expectedPlatformFee = (cost * 100) / 10000; // 1%
+        
+        uint256 creatorBalanceBefore = creator.balance;
+        uint256 platformBalanceBefore = platformOwner.balance;
+        
+        vm.prank(trader1);
+        market.buyShares{value: cost}(marketId, PredictionMarket.Outcome.PUMP, sharesToBuy);
+        
+        // Verify fees were paid immediately
+        assertEq(creator.balance, creatorBalanceBefore + expectedCreatorFee, "Creator should receive fee immediately");
+        assertEq(platformOwner.balance, platformBalanceBefore + expectedPlatformFee, "Platform should receive fee immediately");
+    }
+    
+    function testFeesArePaidImmediatelyOnSell() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        uint256 sharesToBuy = 100;
+        uint256 buyCost = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, sharesToBuy);
+        
+        vm.prank(trader1);
+        market.buyShares{value: buyCost}(marketId, PredictionMarket.Outcome.PUMP, sharesToBuy);
+        
+        // Record balances before sell
+        uint256 creatorBalanceBefore = creator.balance;
+        uint256 platformBalanceBefore = platformOwner.balance;
+        
+        uint256 sharesToSell = 50;
+        uint256 sellPayout = market.calculateSellPayout(marketId, PredictionMarket.Outcome.PUMP, sharesToSell);
+        
+        uint256 expectedCreatorFee = (sellPayout * 10) / 10000; // 0.1%
+        uint256 expectedPlatformFee = (sellPayout * 100) / 10000; // 1%
+        
+        vm.prank(trader1);
+        market.sellShares(marketId, PredictionMarket.Outcome.PUMP, sharesToSell);
+        
+        // Verify fees were paid immediately on sell
+        assertEq(creator.balance, creatorBalanceBefore + expectedCreatorFee, "Creator should receive sell fee immediately");
+        assertEq(platformOwner.balance, platformBalanceBefore + expectedPlatformFee, "Platform should receive sell fee immediately");
+    }
+    
+    function testMultipleTradesAccumulateFeesForCreatorAndPlatform() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        uint256 creatorBalanceStart = creator.balance;
+        uint256 platformBalanceStart = platformOwner.balance;
+        
+        // Multiple traders buy shares
+        for (uint256 i = 0; i < 5; i++) {
+            address trader = address(uint160(1000 + i));
+            vm.deal(trader, 100 ether);
+            
+            uint256 cost = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 50);
+            
+            vm.prank(trader);
+            market.buyShares{value: cost}(marketId, PredictionMarket.Outcome.PUMP, 50);
+        }
+        
+        // Verify creator and platform received fees from all trades
+        assertTrue(creator.balance > creatorBalanceStart, "Creator should have earned fees");
+        assertTrue(platformOwner.balance > platformBalanceStart, "Platform should have earned fees");
+        
+        uint256 totalCreatorFees = creator.balance - creatorBalanceStart;
+        uint256 totalPlatformFees = platformOwner.balance - platformBalanceStart;
+        
+        // Platform fees should be ~10x creator fees (1% vs 0.1%)
+        assertTrue(totalPlatformFees > totalCreatorFees * 9, "Platform fees should be significantly higher");
+    }
+    
+    function testFeesPaidEventEmitted() public {
+        vm.prank(creator);
+        uint256 marketId = market.createMarket{value: CREATOR_FEE}("TOKEN-0x123", 1000e18);
+        
+        uint256 cost = market.calculateBuyCost(marketId, PredictionMarket.Outcome.PUMP, 100);
+        uint256 expectedCreatorFee = (cost * 10) / 10000;
+        uint256 expectedPlatformFee = (cost * 100) / 10000;
+        
+        vm.expectEmit(true, true, true, true);
+        emit PredictionMarket.FeesPaid(marketId, creator, expectedCreatorFee, expectedPlatformFee);
+        
+        vm.prank(trader1);
+        market.buyShares{value: cost}(marketId, PredictionMarket.Outcome.PUMP, 100);
     }
 }
