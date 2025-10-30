@@ -1,0 +1,19 @@
+creators
+1. create market (set token , set if it pump , dump , no change , rug, moon ) by midnight of that day.
+2. creator earn fees 
+
+
+users 
+1. select buy position token 
+2. sell position token to get funds back 
+3. they claim funds when market is settled by midnight.
+
+settlement bot 
+1. settle all  markets by mid night 
+
+
+look at the .todo file , i want to create a simple prediction market for any token  with only 5 out comes, pump (price goes up more than
+   10%), Dump(-10%) , no change (-0.1% to +0.1%) ,rug (more than 50% down) and moon (more than 50% up). each out has a bonding curve which
+   users can buy and sell. winning bet takes everybodies money. settlement bot settle prediction my 12 midnight. all markets get settle by
+   midnight. creator of that market earn trading fees (0.1%). plarform also earn fees 1%. creator when creating only have to put in token
+   addres or id and current price also pay a 0.01 eth creator fee. also when market is settle only winners can sell 
